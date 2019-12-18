@@ -16,9 +16,16 @@ const Q_LEN : usize = 4;
 const OTS_SIGNATURE_LENGTH : usize = 1124; // Table 1
 
 const D_PBLC : u16 = 0x8080;
+const D_MESG : u16 = 0x8181;
 
 /* XDR identifiers */
 const LMOTS_SHA256_N32_W8 : u32 = 4;
+
+/*
+fn checksum(s: &[u8]) -> Vec<u8> {
+    let mut sum : u16 = 0;
+}
+*/
 
 struct LmOtsPrivateKey {
     sk: Vec<u8>
@@ -76,6 +83,7 @@ impl LmOtsPublicKey {
     }
 }
 
+/*
 struct LmsPrivateKey {
     q: Cell<u32>,
 }
@@ -108,6 +116,7 @@ impl LmsPublicKey {
     }
 
 }
+ */
 
 fn main() {
     let mut entropy = mbedtls::rng::OsEntropy::new();
