@@ -2,6 +2,7 @@
 use mbedtls::hash::{Md, Type as MdType};
 use mbedtls::rng::{Random};
 use std::result::{Result as StdResult};
+use std::convert::TryInto;
 use std::cell::Cell;
 
 type Result<T> = StdResult<T, mbedtls::Error>;
@@ -36,6 +37,18 @@ fn add_checksum(v : &mut Vec<u8>) {
     v.push((sum & 0xFF) as u8);
 }
 
+fn hash_to_q(message: &[u8], rnd: &[u8], iq: &[u8]) -> Result<Vec<u8>> {
+    let mut q = vec![0; N];
+    let mut q_hash = Md::new(MdType::Sha256)?;
+    q_hash.update(iq)?;
+    q_hash.update(&D_MESG.to_be_bytes())?;
+    q_hash.update(rnd)?;
+    q_hash.update(message)?;
+    q_hash.finish(&mut q)?;
+    add_checksum(&mut q);
+    Ok(q)
+}
+
 struct LmOtsPrivateKey {
     sk: Vec<u8>
 }
@@ -65,14 +78,7 @@ impl LmOtsPrivateKey {
 
         let iq = &self.sk[4..24]; // I || q
 
-        let mut q = vec![0; N];
-        let mut q_hash = Md::new(MdType::Sha256)?;
-        q_hash.update(iq)?;
-        q_hash.update(&D_MESG.to_be_bytes())?;
-        q_hash.update(rnd)?;
-        q_hash.update(message)?;
-        q_hash.finish(&mut q)?;
-        add_checksum(&mut q);
+        let q = hash_to_q(message, rnd, iq)?;
 
         let mut sig = vec![0u8; OTS_SIGNATURE_LENGTH];
         sig[0..4].copy_from_slice(&self.sk[0..4]); // type
@@ -125,6 +131,49 @@ impl LmOtsPublicKey {
         pk.copy_from_slice(&sk.sk[0..24]); // header is the same
         k_sha256.finish(&mut pk[24..])?;
         Ok(LmOtsPublicKey { pk })
+    }
+
+    fn verify(&self, message: &[u8], sig: &[u8]) -> Result<bool> {
+        if sig.len() != OTS_SIGNATURE_LENGTH {
+            return Ok(false);
+        }
+
+        if u32::from_le_bytes(sig[0..4].try_into().expect("4 bytes")) != LMOTS_SHA256_N32_W8 {
+            return Ok(false);
+        }
+
+        let iq = &self.pk[4..24]; // I || q
+        let k = &self.pk[24..24+N]; // K
+
+        let q = hash_to_q(message, &sig[4..4+N], iq)?;
+
+        let mut k_sha256 = Md::new(MdType::Sha256)?;
+        k_sha256.update(iq)?;
+        k_sha256.update(&D_PBLC.to_be_bytes())?;
+
+        for i in 0..P {
+            let a = coef(&q, i);
+            let mut t = sig[4+N+N*i..4+N+(N+1)*i].to_vec();
+            for j in 0..(255-a) {
+                let mut sha256 = Md::new(MdType::Sha256)?;
+                sha256.update(iq)?;
+                sha256.update(&(i as u16).to_be_bytes())?;
+                sha256.update(&(j as u8).to_be_bytes())?;
+                sha256.update(&t)?;
+                sha256.finish(&mut t)?;
+            }
+            k_sha256.update(&t)?;
+        }
+
+        let mut kc = vec![0u8; N];
+        k_sha256.finish(&mut kc)?;
+
+        if kc == k {
+            return Ok(true);
+        }
+        else {
+            return Ok(false);
+        }
     }
 }
 
