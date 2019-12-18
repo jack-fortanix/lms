@@ -49,10 +49,12 @@ fn hash_to_q(message: &[u8], rnd: &[u8], iq: &[u8]) -> Result<Vec<u8>> {
     Ok(q)
 }
 
+#[derive(Clone, Debug)]
 struct LmOtsPrivateKey {
     sk: Vec<u8>
 }
 
+#[derive(Clone, Debug)]
 struct LmOtsPublicKey {
     pk: Vec<u8>
 }
@@ -68,7 +70,10 @@ impl LmOtsPrivateKey {
         sk[0..4].copy_from_slice(&LMOTS_SHA256_N32_W8.to_be_bytes());
         sk[4..20].copy_from_slice(I);
         sk[20..24].copy_from_slice(&q.to_be_bytes());
-        rng.random(&mut sk[24..])?;
+
+        // hack for mbedtls sigh 
+        rng.random(&mut sk[24..24+100])?;
+        rng.random(&mut sk[24+100..])?;
 
         Ok(LmOtsPrivateKey { sk })
     }
@@ -86,7 +91,7 @@ impl LmOtsPrivateKey {
 
         for i in 0..P {
             let a = coef(&q, i);
-            let mut t = self.sk[24+N*i..24+(N+1)*i].to_vec();
+            let mut t = self.sk[24+N*i..24+N*i+N].to_vec();
             for j in 0..a {
                 let mut sha256 = Md::new(MdType::Sha256)?;
                 sha256.update(iq)?;
@@ -96,7 +101,7 @@ impl LmOtsPrivateKey {
                 sha256.finish(&mut t)?;
             }
 
-            sig[4+N+N*i..4+N+(N+1)*i].copy_from_slice(&t);
+            sig[4+N+N*i..4+N+N*i+N].copy_from_slice(&t);
         }
 
         Ok(sig)
@@ -113,23 +118,27 @@ impl LmOtsPublicKey {
         k_sha256.update(iq)?;
         k_sha256.update(&D_PBLC.to_be_bytes())?;
 
+        println!("sk = {:?}", sk.sk);
         for i in 0..P {
-            let mut t = sk.sk[24+N*i..24+(N+1)*i].to_vec();
+            println!("i={}", i);
+            let mut t = sk.sk[24+N*i..24+N*i+N].to_vec();
+            println!("t={:?}", t);
+            assert_eq!(t.len(), N);
             for j in 0..255 {
                 let mut sha256 = Md::new(MdType::Sha256)?;
                 sha256.update(iq)?;
                 sha256.update(&(i as u16).to_be_bytes())?;
                 sha256.update(&(j as u8).to_be_bytes())?;
                 sha256.update(&t)?;
-                sha256.finish(&mut t)?;
+                sha256.finish(&mut t).unwrap();
             }
             // y[i] is tmp which is fed into computation of K
             k_sha256.update(&t)?;
         }
 
         let mut pk = vec![0u8; 24+N];
-        pk.copy_from_slice(&sk.sk[0..24]); // header is the same
-        k_sha256.finish(&mut pk[24..])?;
+        pk[0..24].copy_from_slice(&sk.sk[0..24]); // header is the same
+        k_sha256.finish(&mut pk[24..]).unwrap();
         Ok(LmOtsPublicKey { pk })
     }
 
@@ -218,5 +227,15 @@ fn main() {
 
     let I = vec![0; 16];
     let q = 1;
-    let lmots = LmOtsPrivateKey::new(&mut rng, &I, q);
+    let sk = LmOtsPrivateKey::new(&mut rng, &I, q).unwrap();
+    println!("{:?}", sk);
+    let pk = LmOtsPublicKey::from_sk(&sk).unwrap();
+
+    let C = vec![0; 32];
+    
+    let msg = vec![1,2,3];
+
+    let sig = sk.sign(&msg, &C).unwrap();
+
+    assert!(pk.verify(&msg, &sig).unwrap());
 }
