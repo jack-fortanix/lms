@@ -13,6 +13,7 @@ const N : usize = 32; // SHA-256
 const LS : usize = 0;
 const P : usize = 34;
 const Q_LEN : usize = 4;
+
 const OTS_SIGNATURE_LENGTH : usize = 1124; // Table 1
 
 const D_PBLC : u16 = 0x8080;
@@ -21,11 +22,19 @@ const D_MESG : u16 = 0x8181;
 /* XDR identifiers */
 const LMOTS_SHA256_N32_W8 : u32 = 4;
 
-/*
-fn checksum(s: &[u8]) -> Vec<u8> {
-    let mut sum : u16 = 0;
+fn coef(v: &[u8], i: usize) -> u8 {
+    v[i]
 }
-*/
+
+fn add_checksum(v : &mut Vec<u8>) {
+    let mut sum : u16 = 0;
+    for i in 0..(N*8)/W {
+        sum += 255u16 - coef(v, i) as u16;
+    }
+
+    v.push((sum >> 8) as u8);
+    v.push((sum & 0xFF) as u8);
+}
 
 struct LmOtsPrivateKey {
     sk: Vec<u8>
@@ -46,9 +55,45 @@ impl LmOtsPrivateKey {
         sk[0..4].copy_from_slice(&LMOTS_SHA256_N32_W8.to_be_bytes());
         sk[4..20].copy_from_slice(I);
         sk[20..24].copy_from_slice(&q.to_be_bytes());
-        rng.random(&mut sk[24..]);
+        rng.random(&mut sk[24..])?;
 
         Ok(LmOtsPrivateKey { sk })
+    }
+
+    fn sign(&self, message: &[u8], rnd: &[u8]) -> Result<Vec<u8>> {
+        assert_eq!(rnd.len(), N);
+
+        let iq = &self.sk[4..24]; // I || q
+
+        let mut q = vec![0; N];
+        let mut q_hash = Md::new(MdType::Sha256)?;
+        q_hash.update(iq)?;
+        q_hash.update(&D_MESG.to_be_bytes())?;
+        q_hash.update(rnd)?;
+        q_hash.update(message)?;
+        q_hash.finish(&mut q)?;
+        add_checksum(&mut q);
+
+        let mut sig = vec![0u8; OTS_SIGNATURE_LENGTH];
+        sig[0..4].copy_from_slice(&self.sk[0..4]); // type
+        sig[4..4+N].copy_from_slice(rnd); // C
+
+        for i in 0..P {
+            let a = coef(&q, i);
+            let mut t = self.sk[24+N*i..24+(N+1)*i].to_vec();
+            for j in 0..a {
+                let mut sha256 = Md::new(MdType::Sha256)?;
+                sha256.update(iq)?;
+                sha256.update(&(i as u16).to_be_bytes())?;
+                sha256.update(&(j as u8).to_be_bytes())?;
+                sha256.update(&t)?;
+                sha256.finish(&mut t)?;
+            }
+
+            sig[4+N+N*i..4+N+(N+1)*i].copy_from_slice(&t);
+        }
+
+        Ok(sig)
     }
 }
 
@@ -59,8 +104,8 @@ impl LmOtsPublicKey {
         let iq = &sk.sk[4..24];
 
         let mut k_sha256 = Md::new(MdType::Sha256)?;
-        k_sha256.update(iq);
-        k_sha256.update(&D_PBLC.to_be_bytes());
+        k_sha256.update(iq)?;
+        k_sha256.update(&D_PBLC.to_be_bytes())?;
 
         for i in 0..P {
             let mut t = sk.sk[24+N*i..24+(N+1)*i].to_vec();
