@@ -118,11 +118,8 @@ impl LmOtsPublicKey {
         k_sha256.update(iq)?;
         k_sha256.update(&D_PBLC.to_be_bytes())?;
 
-        println!("sk = {:?}", sk.sk);
         for i in 0..P {
-            //println!("i={}", i);
             let mut t = sk.sk[24+N*i..24+N*i+N].to_vec();
-            //println!("t={:?}", t);
             assert_eq!(t.len(), N);
             for j in 0..255 {
                 let mut sha256 = Md::new(MdType::Sha256)?;
@@ -144,12 +141,10 @@ impl LmOtsPublicKey {
 
     fn verify(&self, message: &[u8], sig: &[u8]) -> Result<bool> {
         if sig.len() != OTS_SIGNATURE_LENGTH {
-            println!("wrong len");
             return Ok(false);
         }
 
         if u32::from_be_bytes(sig[0..4].try_into().expect("4 bytes")) != LMOTS_SHA256_N32_W8 {
-            println!("bad type??");
             return Ok(false);
         }
 
@@ -179,9 +174,6 @@ impl LmOtsPublicKey {
         let mut kc = vec![0u8; N];
         k_sha256.finish(&mut kc)?;
 
-
-        println!("kc = {:?}", kc);
-        println!("k = {:?}", k);
         if kc == k {
             return Ok(true);
         }
@@ -233,7 +225,6 @@ fn main() {
     let I = vec![0; 16];
     let q = 1;
     let sk = LmOtsPrivateKey::new(&mut rng, &I, q).unwrap();
-    println!("{:?}", sk);
     let pk = LmOtsPublicKey::from_sk(&sk).unwrap();
 
     let C = vec![0; 32];
@@ -243,4 +234,9 @@ fn main() {
     let sig = sk.sign(&msg, &C).unwrap();
 
     assert!(pk.verify(&msg, &sig).unwrap());
+
+    let wrong = vec![2,2,3];
+    assert!(pk.verify(&wrong, &sig).unwrap() == false);
+
+    println!("ok");
 }
