@@ -9,6 +9,7 @@ type Result<T> = StdResult<T, mbedtls::Error>;
 
 /* Parameters */
 
+const H : usize = 5; // FIXME!
 const W : usize = 8;
 const N : usize = 32; // SHA-256
 const LS : usize = 0;
@@ -60,151 +61,139 @@ struct LmOtsPublicKey {
     pk: Vec<u8>
 }
 
-impl LmOtsPrivateKey {
-    fn new(seed: &[u8], I: &[u8], q: u32) -> Result<LmOtsPrivateKey> {
-        assert_eq!(seed.len(), N);
-        assert_eq!(I.len(), I_LEN);
-        assert!(q > 0);
+fn new_ots(seed: &[u8], I: &[u8], q: u32) -> Result<(LmOtsPrivateKey,LmOtsPublicKey)> {
+    assert_eq!(seed.len(), N);
+    assert_eq!(I.len(), I_LEN);
+    assert!(q > 0);
 
-        let mut sk = vec![0; 4 + I_LEN + Q_LEN + N*P];
-        sk[0..4].copy_from_slice(&LMOTS_SHA256_N32_W8.to_be_bytes());
-        sk[4..20].copy_from_slice(I);
-        sk[20..24].copy_from_slice(&q.to_be_bytes());
+    let mut sk = vec![0; 4 + I_LEN + Q_LEN + N*P];
+    sk[0..4].copy_from_slice(&LMOTS_SHA256_N32_W8.to_be_bytes());
+    sk[4..20].copy_from_slice(I);
+    sk[20..24].copy_from_slice(&q.to_be_bytes());
 
-        let mut digest = vec![0; N];
-        for i in 0..P {
+    let mut pk = vec![0u8; 24+N];
+    pk[0..24].copy_from_slice(&sk[0..24]); // header is the same
+
+    let iq = sk[4..24].to_vec();
+
+    let mut k_sha256 = Md::new(MdType::Sha256)?;
+    k_sha256.update(&iq)?;
+    k_sha256.update(&D_PBLC.to_be_bytes())?;
+
+    let mut digest = vec![0; N];
+    // This loop can execute in parallel:
+    for i in 0..P {
+        let mut sha256 = Md::new(MdType::Sha256)?;
+        sha256.update(&iq)?;
+        sha256.update(&(i as u16).to_be_bytes())?;
+        sha256.update(&[0xFF]);
+        sha256.update(seed);
+        sha256.finish(&mut digest);
+        sk[24+i*N..24+i*N+N].copy_from_slice(&digest);
+
+        // This loop can execute in parallel or with SIMD:
+        for j in 0..255 {
             let mut sha256 = Md::new(MdType::Sha256)?;
-            sha256.update(I)?;
-            sha256.update(&q.to_be_bytes());
+            sha256.update(&iq)?;
             sha256.update(&(i as u16).to_be_bytes())?;
-            sha256.update(&[0xFF]);
-            sha256.update(seed);
-            sha256.finish(&mut digest);
-            sk[24+i*N..24+i*N+N].copy_from_slice(&digest);
+            sha256.update(&(j as u8).to_be_bytes())?;
+            sha256.update(&digest)?;
+            sha256.finish(&mut digest).unwrap();
         }
-
-        Ok(LmOtsPrivateKey { sk })
+        // y[i] is tmp which is fed into computation of K
+        k_sha256.update(&digest)?;
     }
 
-    fn sign(&self, message: &[u8], rnd: &[u8]) -> Result<Vec<u8>> {
-        assert_eq!(rnd.len(), N);
-
-        let iq = &self.sk[4..24]; // I || q
-
-        let q = hash_to_q(message, rnd, iq)?;
-
-        let mut sig = vec![0u8; OTS_SIGNATURE_LENGTH];
-        sig[0..4].copy_from_slice(&self.sk[0..4]); // type
-        sig[4..4+N].copy_from_slice(rnd); // C
-
-        for i in 0..P {
-            let a = coef(&q, i);
-            let mut t = self.sk[24+N*i..24+N*i+N].to_vec();
-            for j in 0..a {
-                let mut sha256 = Md::new(MdType::Sha256)?;
-                sha256.update(iq)?;
-                sha256.update(&(i as u16).to_be_bytes())?;
-                sha256.update(&(j as u8).to_be_bytes())?;
-                sha256.update(&t)?;
-                sha256.finish(&mut t)?;
-            }
-
-            sig[4+N+N*i..4+N+N*i+N].copy_from_slice(&t);
-        }
-
-        Ok(sig)
-    }
+    k_sha256.finish(&mut pk[24..]).unwrap();
+    Ok((LmOtsPrivateKey { sk }, LmOtsPublicKey { pk }))
 }
 
-impl LmOtsPublicKey {
-    fn from_sk(sk: &LmOtsPrivateKey) -> Result<LmOtsPublicKey> {
+fn ots_sign(sk: &LmOtsPrivateKey, message: &[u8], rnd: &[u8]) -> Result<Vec<u8>> {
+    assert_eq!(rnd.len(), N);
 
-        // I and q are contiguous both in sk and in hash input
-        let iq = &sk.sk[4..24];
+    let iq = &sk.sk[4..24]; // I || q
 
-        let mut k_sha256 = Md::new(MdType::Sha256)?;
-        k_sha256.update(iq)?;
-        k_sha256.update(&D_PBLC.to_be_bytes())?;
+    let q = hash_to_q(message, rnd, iq)?;
 
-        for i in 0..P {
-            let mut t = sk.sk[24+N*i..24+N*i+N].to_vec();
-            assert_eq!(t.len(), N);
-            for j in 0..255 {
-                let mut sha256 = Md::new(MdType::Sha256)?;
-                sha256.update(iq)?;
-                sha256.update(&(i as u16).to_be_bytes())?;
-                sha256.update(&(j as u8).to_be_bytes())?;
-                sha256.update(&t)?;
-                sha256.finish(&mut t).unwrap();
-            }
-            // y[i] is tmp which is fed into computation of K
-            k_sha256.update(&t)?;
+    let mut sig = vec![0u8; OTS_SIGNATURE_LENGTH];
+    sig[0..4].copy_from_slice(&sk.sk[0..4]); // type
+    sig[4..4+N].copy_from_slice(rnd); // C
+
+    for i in 0..P {
+        let a = coef(&q, i);
+        let mut t = sk.sk[24+N*i..24+N*i+N].to_vec();
+        for j in 0..a {
+            let mut sha256 = Md::new(MdType::Sha256)?;
+            sha256.update(iq)?;
+            sha256.update(&(i as u16).to_be_bytes())?;
+            sha256.update(&(j as u8).to_be_bytes())?;
+            sha256.update(&t)?;
+            sha256.finish(&mut t)?;
         }
 
-        let mut pk = vec![0u8; 24+N];
-        pk[0..24].copy_from_slice(&sk.sk[0..24]); // header is the same
-        k_sha256.finish(&mut pk[24..]).unwrap();
-        Ok(LmOtsPublicKey { pk })
+        sig[4+N+N*i..4+N+N*i+N].copy_from_slice(&t);
     }
 
-    fn verify(&self, message: &[u8], sig: &[u8]) -> Result<bool> {
-        if sig.len() != OTS_SIGNATURE_LENGTH {
-            return Ok(false);
-        }
-
-        if u32::from_be_bytes(sig[0..4].try_into().expect("4 bytes")) != LMOTS_SHA256_N32_W8 {
-            return Ok(false);
-        }
-
-        let iq = &self.pk[4..24]; // I || q
-        let k = &self.pk[24..24+N]; // K
-
-        let q = hash_to_q(message, &sig[4..4+N], iq)?;
-
-        let mut k_sha256 = Md::new(MdType::Sha256)?;
-        k_sha256.update(iq)?;
-        k_sha256.update(&D_PBLC.to_be_bytes())?;
-
-        for i in 0..P {
-            let a = coef(&q, i);
-            let mut t = sig[4+N+N*i..4+N+N*i+N].to_vec();
-            for j in a..255 {
-                let mut sha256 = Md::new(MdType::Sha256)?;
-                sha256.update(iq)?;
-                sha256.update(&(i as u16).to_be_bytes())?;
-                sha256.update(&(j as u8).to_be_bytes())?;
-                sha256.update(&t)?;
-                sha256.finish(&mut t)?;
-            }
-            k_sha256.update(&t)?;
-        }
-
-        let mut kc = vec![0u8; N];
-        k_sha256.finish(&mut kc)?;
-
-        if kc == k {
-            return Ok(true);
-        }
-        else {
-            return Ok(false);
-        }
-    }
+    Ok(sig)
 }
 
-/*
+fn ots_verify(pk: &LmOtsPublicKey, message: &[u8], sig: &[u8]) -> Result<bool> {
+
+    if sig.len() != OTS_SIGNATURE_LENGTH {
+        return Ok(false);
+    }
+
+    if u32::from_be_bytes(sig[0..4].try_into().expect("4 bytes")) != LMOTS_SHA256_N32_W8 {
+        return Ok(false);
+    }
+
+    let iq = &pk.pk[4..24]; // I || q
+    let k = &pk.pk[24..24+N]; // K
+
+    let q = hash_to_q(message, &sig[4..4+N], iq)?;
+
+    let mut k_sha256 = Md::new(MdType::Sha256)?;
+    k_sha256.update(iq)?;
+    k_sha256.update(&D_PBLC.to_be_bytes())?;
+
+    for i in 0..P {
+        let a = coef(&q, i);
+        let mut t = sig[4+N+N*i..4+N+N*i+N].to_vec();
+        for j in a..255 {
+            let mut sha256 = Md::new(MdType::Sha256)?;
+            sha256.update(iq)?;
+            sha256.update(&(i as u16).to_be_bytes())?;
+            sha256.update(&(j as u8).to_be_bytes())?;
+            sha256.update(&t)?;
+            sha256.finish(&mut t)?;
+        }
+        k_sha256.update(&t)?;
+    }
+
+    let mut kc = vec![0u8; N];
+    k_sha256.finish(&mut kc)?;
+    return Ok(kc == k);
+}
+
 struct LmsPrivateKey {
+    I: Vec<u8>,
+    K: Vec<u8>,
     q: Cell<u32>,
+    pk: Vec<u8>,
 }
 
 struct LmsPublicKey {
-
+    pk: Vec<u8>,
 }
 
 impl LmsPrivateKey {
     fn new(seed: &[u8]) -> Result<LmsPrivateKey> {
-
+        assert_eq!(seed.len(), I_LEN + N);
         Ok(LmsPrivateKey {
+            I: seed[0..I_LEN].to_vec(),
+            K: seed[I_LEN..].to_vec(),
             q: Cell::new(0),
+            pk: vec![], // FIXME
         })
     }
 
@@ -213,40 +202,47 @@ impl LmsPrivateKey {
     }
 
     fn public_key(&self) -> Result<LmsPublicKey> {
-        Ok(LmsPublicKey {})
+        Ok(LmsPublicKey { pk: vec![] })
     }
 }
 
 impl LmsPublicKey {
+
+    fn from_sk(sk: LmsPrivateKey) -> Result<LmsPublicKey> {
+        Ok(LmsPublicKey { pk: sk.pk })
+    }
 
     fn verify(message: &[u8], signature: &[u8]) -> Result<bool> {
         Ok(false)
     }
 
 }
- */
 
-fn main() {
-    //let mut entropy = mbedtls::rng::OsEntropy::new();
-    //let mut rng = mbedtls::rng::CtrDrbg::new(&mut entropy, None).unwrap();
-
+#[test]
+fn ots_test() {
     let I = vec![0; I_LEN];
     let q = 1;
 
     let ots_seed = vec![0; N];
-    let sk = LmOtsPrivateKey::new(&ots_seed, &I, q).unwrap();
-    let pk = LmOtsPublicKey::from_sk(&sk).unwrap();
+    let (sk,pk) = new_ots(&ots_seed, &I, q).unwrap();
 
     let C = vec![0; 32];
 
     let msg = vec![1,2,3];
 
-    let sig = sk.sign(&msg, &C).unwrap();
+    let sig = ots_sign(&sk, &msg, &C).unwrap();
 
-    assert!(pk.verify(&msg, &sig).unwrap());
+    assert!(ots_verify(&pk, &msg, &sig).unwrap());
 
     let wrong = vec![2,2,3];
-    assert!(pk.verify(&wrong, &sig).unwrap() == false);
+    assert!(ots_verify(&pk, &wrong, &sig).unwrap() == false);
+}
+
+fn main() {
+    //let mut entropy = mbedtls::rng::OsEntropy::new();
+    //let mut rng = mbedtls::rng::CtrDrbg::new(&mut entropy, None).unwrap();
+
+    let ots_seed = vec![0; N];
 
     println!("ok");
 }
