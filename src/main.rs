@@ -10,6 +10,7 @@ type Result<T> = StdResult<T, mbedtls::Error>;
 /* Parameters */
 
 const H : usize = 5; // FIXME!
+const H_POW : u32 = (1 << H) as u32;
 const W : usize = 8;
 const N : usize = 32; // SHA-256
 const LS : usize = 0;
@@ -21,6 +22,8 @@ const OTS_SIGNATURE_LENGTH : usize = 1124; // Table 1
 
 const D_PBLC : u16 = 0x8080;
 const D_MESG : u16 = 0x8181;
+const D_LEAF : u16 = 0x8282;
+const D_INTR : u16 = 0x8383;
 
 /* XDR identifiers */
 const LMOTS_SHA256_N32_W8 : u32 = 4;
@@ -64,7 +67,7 @@ struct LmOtsPublicKey {
 fn new_ots(seed: &[u8], I: &[u8], q: u32) -> Result<(LmOtsPrivateKey,LmOtsPublicKey)> {
     assert_eq!(seed.len(), N);
     assert_eq!(I.len(), I_LEN);
-    assert!(q > 0);
+    //assert!(q > 0);
 
     let mut sk = vec![0; 4 + I_LEN + Q_LEN + N*P];
     sk[0..4].copy_from_slice(&LMOTS_SHA256_N32_W8.to_be_bytes());
@@ -138,7 +141,6 @@ fn ots_sign(sk: &LmOtsPrivateKey, message: &[u8], rnd: &[u8]) -> Result<Vec<u8>>
 }
 
 fn ots_verify(pk: &LmOtsPublicKey, message: &[u8], sig: &[u8]) -> Result<bool> {
-
     if sig.len() != OTS_SIGNATURE_LENGTH {
         return Ok(false);
     }
@@ -189,9 +191,59 @@ struct LmsPublicKey {
 impl LmsPrivateKey {
     fn new(seed: &[u8]) -> Result<LmsPrivateKey> {
         assert_eq!(seed.len(), I_LEN + N);
+
+        let I = seed[0..I_LEN].to_vec();
+        let seed = seed[I_LEN..].to_vec();
+
+        let mut ots_pk = Vec::with_capacity(H_POW as usize);
+
+        for q in 0..H_POW {
+            // The sk can be rederived from the seed when needed
+            let (_sk,pk) = new_ots(&seed, &I, q)?;
+            let pk = pk.pk[24..].to_vec(); // FIXME just don't add header to pk
+            ots_pk.push(pk);
+        }
+
+        // See RFC 8554 Appendix C
+        // FIXME do each key without storing it !
+        /*
+
+     if r >= 2^h:
+          H(I||u32str(r)||u16str(D_LEAF)||OTS_PUB_HASH[r-2^h])
+     else
+          H(I||u32str(r)||u16str(D_INTR)||T[2*r]||T[2*r+1])
+         */
+        let mut stack : std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::with_capacity(30); // fixme bogus capacity ...
+        for i in 0..H_POW {
+            let mut r : u32 = i + H_POW; // ???
+            let mut t = vec![0u8; N];
+            let mut t_hash = Md::new(MdType::Sha256)?;
+            t_hash.update(&I);
+            t_hash.update(&r.to_be_bytes());
+            t_hash.update(&D_LEAF.to_be_bytes());
+            t_hash.update(&ots_pk[i as usize]);
+            t_hash.finish(&mut t);
+
+            let mut j = i;
+            while j % 2 == 1 {
+                r = (r - 1) / 2;
+                j = (j - 1) / 2;
+                let ls = stack.pop_front().expect("Stack not empty");
+                let mut l_hash = Md::new(MdType::Sha256)?;
+                l_hash.update(&I);
+                l_hash.update(&r.to_be_bytes());
+                l_hash.update(&D_INTR.to_be_bytes());
+                l_hash.update(&ls);
+                l_hash.update(&t);
+                l_hash.finish(&mut t);
+            }
+
+            stack.push_back(t);
+        }
+
         Ok(LmsPrivateKey {
-            I: seed[0..I_LEN].to_vec(),
-            K: seed[I_LEN..].to_vec(),
+            I: I,
+            K: seed,
             q: Cell::new(0),
             pk: vec![], // FIXME
         })
@@ -242,7 +294,8 @@ fn main() {
     //let mut entropy = mbedtls::rng::OsEntropy::new();
     //let mut rng = mbedtls::rng::CtrDrbg::new(&mut entropy, None).unwrap();
 
-    let ots_seed = vec![0; N];
+    let ots_seed = vec![0; N+16];
+    let sk = LmsPrivateKey::new(&ots_seed).unwrap();
 
     println!("ok");
 }
