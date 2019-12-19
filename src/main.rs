@@ -14,6 +14,7 @@ const N : usize = 32; // SHA-256
 const LS : usize = 0;
 const P : usize = 34;
 const Q_LEN : usize = 4;
+const I_LEN : usize = 16;
 
 const OTS_SIGNATURE_LENGTH : usize = 1124; // Table 1
 
@@ -60,20 +61,27 @@ struct LmOtsPublicKey {
 }
 
 impl LmOtsPrivateKey {
-    fn new(rng: &mut impl Random, I: &[u8], q: u32) -> Result<LmOtsPrivateKey> {
-        // TODO instead derive it via a seed as in Appendix A
-        assert_eq!(I.len(), 16);
+    fn new(seed: &[u8], I: &[u8], q: u32) -> Result<LmOtsPrivateKey> {
+        assert_eq!(seed.len(), N);
+        assert_eq!(I.len(), I_LEN);
         assert!(q > 0);
 
-        let ots_privkey_len = 4 + 16 + 4 + N*P;
-        let mut sk = vec![0; ots_privkey_len];
+        let mut sk = vec![0; 4 + I_LEN + Q_LEN + N*P];
         sk[0..4].copy_from_slice(&LMOTS_SHA256_N32_W8.to_be_bytes());
         sk[4..20].copy_from_slice(I);
         sk[20..24].copy_from_slice(&q.to_be_bytes());
 
-        // hack for mbedtls sigh 
-        rng.random(&mut sk[24..24+100])?;
-        rng.random(&mut sk[24+100..])?;
+        let mut digest = vec![0; N];
+        for i in 0..P {
+            let mut sha256 = Md::new(MdType::Sha256)?;
+            sha256.update(I)?;
+            sha256.update(&q.to_be_bytes());
+            sha256.update(&(i as u16).to_be_bytes())?;
+            sha256.update(&[0xFF]);
+            sha256.update(seed);
+            sha256.finish(&mut digest);
+            sk[24+i*N..24+i*N+N].copy_from_slice(&digest);
+        }
 
         Ok(LmOtsPrivateKey { sk })
     }
@@ -219,16 +227,18 @@ impl LmsPublicKey {
  */
 
 fn main() {
-    let mut entropy = mbedtls::rng::OsEntropy::new();
-    let mut rng = mbedtls::rng::CtrDrbg::new(&mut entropy, None).unwrap();
+    //let mut entropy = mbedtls::rng::OsEntropy::new();
+    //let mut rng = mbedtls::rng::CtrDrbg::new(&mut entropy, None).unwrap();
 
-    let I = vec![0; 16];
+    let I = vec![0; I_LEN];
     let q = 1;
-    let sk = LmOtsPrivateKey::new(&mut rng, &I, q).unwrap();
+
+    let ots_seed = vec![0; N];
+    let sk = LmOtsPrivateKey::new(&ots_seed, &I, q).unwrap();
     let pk = LmOtsPublicKey::from_sk(&sk).unwrap();
 
     let C = vec![0; 32];
-    
+
     let msg = vec![1,2,3];
 
     let sig = sk.sign(&msg, &C).unwrap();
