@@ -206,14 +206,7 @@ impl LmsPrivateKey {
 
         // See RFC 8554 Appendix C
         // FIXME do each key without storing it !
-        /*
-
-     if r >= 2^h:
-          H(I||u32str(r)||u16str(D_LEAF)||OTS_PUB_HASH[r-2^h])
-     else
-          H(I||u32str(r)||u16str(D_INTR)||T[2*r]||T[2*r+1])
-         */
-        let mut stack : std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::with_capacity(30); // fixme bogus capacity ...
+        let mut stack : std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::with_capacity(H - 1);
         for i in 0..H_POW {
             let mut r : u32 = i + H_POW; // ???
             let mut t = vec![0u8; N];
@@ -241,11 +234,15 @@ impl LmsPrivateKey {
             stack.push_back(t);
         }
 
+        assert_eq!(stack.len(), 1);
+
+        let pk = stack.pop_front().expect("Stack not empty");
+
         Ok(LmsPrivateKey {
             I: I,
             K: seed,
             q: Cell::new(0),
-            pk: vec![], // FIXME
+            pk: pk,
         })
     }
 
@@ -290,12 +287,16 @@ fn ots_test() {
     assert!(ots_verify(&pk, &wrong, &sig).unwrap() == false);
 }
 
+use rustc_serialize::hex::ToHex;
+
 fn main() {
     //let mut entropy = mbedtls::rng::OsEntropy::new();
     //let mut rng = mbedtls::rng::CtrDrbg::new(&mut entropy, None).unwrap();
 
     let ots_seed = vec![0; N+16];
     let sk = LmsPrivateKey::new(&ots_seed).unwrap();
+
+    println!("pk={}", sk.pk.to_hex());
 
     println!("ok");
 }
