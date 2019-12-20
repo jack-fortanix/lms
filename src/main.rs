@@ -3,7 +3,6 @@ use mbedtls::hash::{Md, Type as MdType};
 use mbedtls::rng::{Random};
 use std::result::{Result as StdResult};
 use std::convert::TryInto;
-use std::cell::Cell;
 
 type Result<T> = StdResult<T, mbedtls::Error>;
 
@@ -180,7 +179,7 @@ fn ots_verify(pk: &LmOtsPublicKey, message: &[u8], sig: &[u8]) -> Result<bool> {
 struct LmsPrivateKey {
     I: Vec<u8>,
     K: Vec<u8>,
-    q: Cell<u32>,
+    q: u32,
     pk: Vec<u8>,
 }
 
@@ -195,26 +194,18 @@ impl LmsPrivateKey {
         let I = seed[0..I_LEN].to_vec();
         let seed = seed[I_LEN..].to_vec();
 
-        let mut ots_pk = Vec::with_capacity(H_POW as usize);
-
-        for q in 0..H_POW {
-            // The sk can be rederived from the seed when needed
-            let (_sk,pk) = new_ots(&seed, &I, q)?;
-            let pk = pk.pk[24..].to_vec(); // FIXME just don't add header to pk
-            ots_pk.push(pk);
-        }
-
         // See RFC 8554 Appendix C
-        // FIXME do each key without storing it !
         let mut stack : std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::with_capacity(H - 1);
         for i in 0..H_POW {
+            let (_sk,pk) = new_ots(&seed, &I, i)?;
+
             let mut r : u32 = i + H_POW; // ???
             let mut t = vec![0u8; N];
             let mut t_hash = Md::new(MdType::Sha256)?;
             t_hash.update(&I);
             t_hash.update(&r.to_be_bytes());
             t_hash.update(&D_LEAF.to_be_bytes());
-            t_hash.update(&ots_pk[i as usize]);
+            t_hash.update(&pk.pk[24..]); // fixme don't add header here
             t_hash.finish(&mut t);
 
             let mut j = i;
@@ -236,17 +227,25 @@ impl LmsPrivateKey {
 
         assert_eq!(stack.len(), 1);
 
+        // FIXME add types and I
         let pk = stack.pop_front().expect("Stack not empty");
 
         Ok(LmsPrivateKey {
             I: I,
             K: seed,
-            q: Cell::new(0),
+            q: 0,
             pk: pk,
         })
     }
 
-    fn sign(message: &[u8]) -> Result<Vec<u8>> {
+    fn sign(&mut self, message: &[u8], rnd: &[u8]) -> Result<Vec<u8>> {
+        assert_eq!(rnd.len(), N);
+        // FIXME this computes public key which we don't need + is expensive!
+        let (sk,pk) = new_ots(&self.K, &self.I, self.q)?;
+        self.q += 1;
+
+        ots_sign(&sk, message, rnd);
+
         Ok(vec![])
     }
 
