@@ -2,7 +2,6 @@
 use mbedtls::hash::{Md, Type as MdType};
 use mbedtls::rng::{Random};
 use std::result::{Result as StdResult};
-use std::collections::BTreeMap;
 use std::convert::TryInto;
 
 use rustc_serialize::hex::ToHex;// remove just for debug
@@ -297,7 +296,7 @@ struct LmsPrivateKey {
     pk_type: u32,
     q: u32,
     pk: Vec<u8>,
-    Ts: BTreeMap<u32, Vec<u8>>,
+    Ts: Vec<u8>,
 }
 
 struct LmsPublicKey {
@@ -314,8 +313,7 @@ impl LmsPrivateKey {
         let I = seed[0..I_LEN].to_vec();
         let seed = seed[I_LEN..].to_vec();
 
-        // Instead let mut Ts = vec[h_pow; vec![0; N]]; ??
-        let mut Ts = BTreeMap::new();
+        let mut Ts = vec![0u8; 2*N*(h_pow as usize)];
 
         // See RFC 8554 Appendix C
         let mut stack : std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::with_capacity(h - 1);
@@ -334,8 +332,8 @@ impl LmsPrivateKey {
             t_hash.finish(&mut t);
 
             //println!("T[{}] = {}", r, t.to_hex());
-            assert!(!Ts.contains_key(&r));
-            Ts.insert(r, t.to_vec());
+
+            Ts[(r as usize)*N..(r as usize + 1)*N].copy_from_slice(&t);
 
             let mut j = i;
             while j % 2 == 1 {
@@ -354,10 +352,8 @@ impl LmsPrivateKey {
 
                 l_hash.update(&t);
                 l_hash.finish(&mut t);
-                assert!(!Ts.contains_key(&r));
-                Ts.insert(r, t.to_vec());
-                //println!("T[{}] = {}", r, t.to_hex());
 
+                Ts[(r as usize)*N..(r as usize + 1)*N].copy_from_slice(&t);
             }
 
             stack.push_front(t);
@@ -365,14 +361,11 @@ impl LmsPrivateKey {
 
         assert_eq!(stack.len(), 1);
 
-        // FIXME add types and I
-        let mut pk_t1 = stack.pop_front().expect("Stack not empty");
-
         let mut pk = vec![];
         pk.extend(pk_type.to_be_bytes().iter());
         pk.extend(LMOTS_SHA256_N32_W8.to_be_bytes().iter());
         pk.extend(I.clone());
-        pk.extend(pk_t1);
+        pk.extend(stack.pop_front().expect("Stack not empty"));
 
         Ok(LmsPrivateKey {
             I: I,
@@ -407,9 +400,7 @@ impl LmsPrivateKey {
         let mut r = h_pow + q;
         for i in 0..h {
             let idx = (r >> i) ^ 1;
-            assert!(self.Ts.contains_key(&idx));
-            println!("path {} = {}", idx, self.Ts[&idx].to_hex());
-            sig.extend(self.Ts[&idx].to_owned());
+            sig.extend(self.Ts[(idx as usize)*N..(idx as usize + 1)*N].iter());
         }
 
         Ok(sig)
