@@ -2,6 +2,7 @@
 use mbedtls::hash::{Md, Type as MdType};
 use mbedtls::rng::{Random};
 use std::result::{Result as StdResult};
+use std::collections::BTreeMap;
 use std::convert::TryInto;
 
 use rustc_serialize::hex::ToHex;// remove just for debug
@@ -28,7 +29,16 @@ const D_LEAF : u16 = 0x8282;
 const D_INTR : u16 = 0x8383;
 
 /* XDR identifiers */
+const LMOTS_SHA256_N32_W1 : u32 = 1;
+const LMOTS_SHA256_N32_W2 : u32 = 2;
+const LMOTS_SHA256_N32_W4 : u32 = 3;
 const LMOTS_SHA256_N32_W8 : u32 = 4;
+
+const LMS_SHA256_N32_H5 : u32 = 5;
+const LMS_SHA256_N32_H10 : u32 = 6;
+const LMS_SHA256_N32_H15 : u32 = 7;
+const LMS_SHA256_N32_H20 : u32 = 8;
+const LMS_SHA256_N32_H25 : u32 = 9;
 
 fn coef(v: &[u8], i: usize) -> u8 {
     v[i]
@@ -61,14 +71,14 @@ fn hash_to_qx(message: &[u8], rnd: &[u8], i: &[u8], q: u32) -> Result<Vec<u8>> {
     let mut r = vec![0; N];
     let mut r_hash = Md::new(MdType::Sha256)?;
 
-    println!("Input = {}{:08X}{:04X}{}{}", i.to_hex(), q, D_MESG, rnd.to_hex(), message.to_hex());
+    //println!("Input = {}{:08X}{:04X}{}{}", i.to_hex(), q, D_MESG, rnd.to_hex(), message.to_hex());
     r_hash.update(i)?;
     r_hash.update(&q.to_be_bytes());
     r_hash.update(&D_MESG.to_be_bytes())?;
     r_hash.update(rnd)?;
     r_hash.update(message)?;
     r_hash.finish(&mut r)?;
-    println!("Output = {}", r.to_hex());
+    //println!("Output = {}", r.to_hex());
     add_checksum(&mut r);
     Ok(r)
 }
@@ -84,8 +94,8 @@ fn lms_hash(mut out: &mut [u8], inputs: Vec<&[u8]>) -> Result<()> {
     }
 
     sha256.finish(&mut out)?;
-    println!("Input {}", hinput);
-    println!("Output {}", out.to_hex());
+    //println!("Input {}", hinput);
+    //println!("Output {}", out.to_hex());
 
     Ok(())
 }
@@ -215,21 +225,21 @@ fn algorithm_4b(id: &[u8], q: u32, message: &[u8], sig: &[u8]) -> Result<Vec<u8>
         for j in a..255 {
             let mut sha256 = Md::new(MdType::Sha256)?;
 
-            println!("Input = {}{:08X}{:04X}{:02X}{}", id.to_hex(), q, i, j, t.to_hex());
+            //println!("Input = {}{:08X}{:04X}{:02X}{}", id.to_hex(), q, i, j, t.to_hex());
             sha256.update(id)?;
             sha256.update(&q.to_be_bytes())?;
             sha256.update(&(i as u16).to_be_bytes())?;
             sha256.update(&(j as u8).to_be_bytes())?;
             sha256.update(&t)?;
             sha256.finish(&mut t)?;
-            println!("Output = {}", t.to_hex());
+            //println!("Output = {}", t.to_hex());
         }
         k_sha256.update(&t)?;
     }
 
     let mut kc = vec![0u8; N];
     k_sha256.finish(&mut kc)?;
-    println!("Kc = {}", kc.to_hex());
+    //println!("Kc = {}", kc.to_hex());
     return Ok(kc);
 }
 
@@ -273,8 +283,10 @@ fn ots_verify(pk: &LmOtsPublicKey, message: &[u8], sig: &[u8]) -> Result<bool> {
 struct LmsPrivateKey {
     I: Vec<u8>,
     K: Vec<u8>,
+    pk_type: u32,
     q: u32,
     pk: Vec<u8>,
+    Ts: BTreeMap<u32, Vec<u8>>,
 }
 
 struct LmsPublicKey {
@@ -288,8 +300,14 @@ impl LmsPrivateKey {
         let I = seed[0..I_LEN].to_vec();
         let seed = seed[I_LEN..].to_vec();
 
+        let pk_type = LMS_SHA256_N32_H5; // fixme
+
+        // Instead let mut Ts = vec[H_POW; vec![0; N]]; ??
+        let mut Ts = BTreeMap::new();
+
         // See RFC 8554 Appendix C
         let mut stack : std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::with_capacity(H - 1);
+
         for i in 0..H_POW {
             let (_sk,pk) = new_ots(&seed, &I, i)?;
 
@@ -299,52 +317,94 @@ impl LmsPrivateKey {
             t_hash.update(&I);
             t_hash.update(&r.to_be_bytes());
             t_hash.update(&D_LEAF.to_be_bytes());
+            println!("LEAF {} = {}", r, pk.pk[24..].to_hex());
             t_hash.update(&pk.pk[24..]); // fixme don't add header here
             t_hash.finish(&mut t);
+
+            println!("T[{}] = {}", r, t.to_hex());
+            assert!(!Ts.contains_key(&r));
+            Ts.insert(r, t.to_vec());
 
             let mut j = i;
             while j % 2 == 1 {
                 r = (r - 1) / 2;
                 j = (j - 1) / 2;
                 let ls = stack.pop_front().expect("Stack not empty");
+
                 let mut l_hash = Md::new(MdType::Sha256)?;
                 l_hash.update(&I);
                 l_hash.update(&r.to_be_bytes());
                 l_hash.update(&D_INTR.to_be_bytes());
                 l_hash.update(&ls);
+
+                println!("KeyGen node {} from {}, {}", r, ls.to_hex(),t.to_hex());
+                //println!("Intr {} = {}", r, t.to_hex());
+
                 l_hash.update(&t);
                 l_hash.finish(&mut t);
+                assert!(!Ts.contains_key(&r));
+                Ts.insert(r, t.to_vec());
+                println!("T[{}] = {}", r, t.to_hex());
+
             }
 
-            stack.push_back(t);
+            stack.push_front(t);
         }
 
         assert_eq!(stack.len(), 1);
 
         // FIXME add types and I
-        let pk = stack.pop_front().expect("Stack not empty");
+        let mut pk_t1 = stack.pop_front().expect("Stack not empty");
+
+        let mut pk = vec![];
+        pk.extend(pk_type.to_be_bytes().iter());
+        pk.extend(LMOTS_SHA256_N32_W8.to_be_bytes().iter());
+        pk.extend(I.clone());
+        pk.extend(pk_t1);
 
         Ok(LmsPrivateKey {
             I: I,
             K: seed,
-            q: 0,
+            q: 1,
             pk: pk,
+            pk_type: pk_type,
+            Ts: Ts,
         })
     }
 
     fn sign(&mut self, message: &[u8], rnd: &[u8]) -> Result<Vec<u8>> {
         assert_eq!(rnd.len(), N);
-        // FIXME this computes public key which we don't need + is expensive!
-        let sk = new_ots_sk(&self.K, &self.I, self.q)?;
+        let q = self.q;
         self.q += 1;
+        let sk = new_ots_sk(&self.K, &self.I, q)?;
 
-        ots_sign(&sk, message, rnd);
+        let mut ots_sig = ots_sign(&sk, message, rnd)?;
 
+        /*
+        u32str(q) || lmots_signature || u32str(type) || path[0] || path[1] || path[2] || ... || path[h-1]
+        */
+        let mut sig = vec![];
+        sig.extend(q.to_be_bytes().iter());
+        sig.append(&mut ots_sig);
+        sig.extend(self.pk_type.to_be_bytes().iter());
+
+        let mut r = H_POW + q;
+        for i in 0..H {
+            let idx = (r >> i) ^ 1;
+            assert!(self.Ts.contains_key(&idx));
+            println!("path {} = {}", idx, self.Ts[&idx].to_hex());
+            sig.extend(self.Ts[&idx].to_owned());
+        }
+
+        Ok(sig)
+    }
+
+    fn serialize(&self) -> Result<Vec<u8>> {
         Ok(vec![])
     }
 
     fn public_key(&self) -> Result<LmsPublicKey> {
-        Ok(LmsPublicKey { pk: vec![] })
+        Ok(LmsPublicKey { pk: self.pk.clone() })
     }
 }
 
@@ -361,15 +421,38 @@ impl LmsPublicKey {
     fn verify(&self, message: &[u8], signature: &[u8]) -> Result<bool> {
         // pubtype + ots_typecode + I + K
         if self.pk.len() != (4 + 4 + 16 + 32) {
-            println!("bad pk");
+            println!("bad pk {}", self.pk.len());
             return Ok(false);
         }
 
-        let h = 5; // FIXME take from pubkey!
+        let pk_type = u32::from_be_bytes(self.pk[0..4].try_into().expect("4 bytes"));
+
+        let h = match pk_type {
+            LMS_SHA256_N32_H5 => 5,
+            LMS_SHA256_N32_H10 => 10,
+            LMS_SHA256_N32_H15 => 15,
+            LMS_SHA256_N32_H20 => 20,
+            LMS_SHA256_N32_H25 => 25,
+            _ => return Ok(false)
+        };
+
+        let ots_type = u32::from_be_bytes(self.pk[4..8].try_into().expect("4 bytes"));
+
+        if ots_type != LMOTS_SHA256_N32_W8 {
+            println!("bad ots");
+            return Ok(false); // Only support W=8
+        }
 
         let expected_sig_len = 12 + N*(P+1) + M*h;
         if signature.len() != expected_sig_len { // ????
-            println!("bad len? {} vs {}", signature.len(), expected_sig_len);
+            println!("bad sig len? {} vs {}", signature.len(), expected_sig_len);
+            return Ok(false);
+        }
+
+        let sig_pk_type = u32::from_be_bytes(signature[8+N*(P+1)..12+N*(P+1)].try_into().expect("4 bytes"));
+
+        if pk_type != sig_pk_type {
+            println!("signature and pk types don't match (??)");
             return Ok(false);
         }
 
@@ -396,9 +479,10 @@ impl LmsPublicKey {
          */
         let I = self.pk[8..8+I_LEN].to_vec(); // I
         assert_eq!(I.len(), I_LEN);
-        let iq = self.pk[4..24].to_vec(); // I || q // wrong q!!!
+
         let Kc = algorithm_4b(&I, q, message, lmots_signature)?;
         assert!(Kc.len() == M);
+        println!("Kc = {}", Kc.to_hex());
 
         let T1 = self.pk[24..].to_vec();
         println!("pk = {}", self.pk.to_hex());
@@ -432,16 +516,19 @@ impl LmsPublicKey {
             node_num /= 2;
 
             let mut t_hash = Md::new(MdType::Sha256)?;
+
             t_hash.update(&I);
             t_hash.update(&node_num.to_be_bytes());
             t_hash.update(&D_INTR.to_be_bytes());
 
             if odd {
-                println!("Input = {}{:08X}{:04X}{}{}", I.to_hex(), node_num, D_INTR, &paths[N*i..N*(i+1)].to_hex(), Tc.to_hex());
+                println!("Path {} {}", i, "Tc");
+                println!("Computing node {} from {} {}", node_num, &paths[N*i..N*(i+1)].to_hex(), Tc.to_hex());
                 t_hash.update(&paths[N*i..N*(i+1)]);
                 t_hash.update(&Tc);
             } else {
-                println!("Input = {}{:08X}{:04X}{}{}", I.to_hex(), node_num, D_INTR,  Tc.to_hex(), &paths[N*i..N*(i+1)].to_hex());
+                println!("Path {} {}", "Tc", i);
+                println!("Computing node {} from {} {}", node_num, Tc.to_hex(), &paths[N*i..N*(i+1)].to_hex());
                 t_hash.update(&Tc);
                 t_hash.update(&paths[N*i..N*(i+1)]);
             }
@@ -698,6 +785,18 @@ fn lms_kat() {
 
 #[test]
 fn lms_5_sign_kat() {
+    use rustc_serialize::hex::FromHex;
+
+    let seed = vec![0xFF; 48];
+    let mut sk = LmsPrivateKey::new(&seed).unwrap();
+
+    let msg = "616263".from_hex().unwrap();
+    let rnd = vec![0; 32];
+    let sig = sk.sign(&msg, &rnd).unwrap();
+
+    let pk = sk.public_key().unwrap();
+
+    assert!(pk.verify(&msg, &sig).unwrap());
 
 }
 
