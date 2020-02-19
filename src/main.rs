@@ -1,4 +1,6 @@
 
+#![allow(non_snake_case)]
+
 use mbedtls::hash::{Md, Type as MdType};
 use mbedtls::rng::{Random};
 use std::result::{Result as StdResult};
@@ -33,15 +35,55 @@ const D_INTR : u16 = 0x8383;
 //const LMOTS_SHA256_N32_W4 : u32 = 3;
 const LMOTS_SHA256_N32_W8 : u32 = 4;
 
+#[allow(non_camel_case_types)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum LmsParameters {
+    Sha256_H5,
+    Sha256_H10,
+    Sha256_H15,
+    Sha256_H20,
+    Sha256_H25
+}
+
+impl LmsParameters {
+    fn from_u32(v: u32) -> Result<LmsParameters> {
+        match v {
+            5 => Ok(LmsParameters::Sha256_H5),
+            6 => Ok(LmsParameters::Sha256_H10),
+            7 => Ok(LmsParameters::Sha256_H15),
+            8 => Ok(LmsParameters::Sha256_H20),
+            9 => Ok(LmsParameters::Sha256_H25),
+            _ => Err(mbedtls::Error::PkUnknownPkAlg)
+        }
+    }
+
+    fn to_u32(&self) -> u32 {
+        match self {
+            LmsParameters::Sha256_H5 => 5,
+            LmsParameters::Sha256_H10 => 6,
+            LmsParameters::Sha256_H15 => 7,
+            LmsParameters::Sha256_H20 => 8,
+            LmsParameters::Sha256_H25 => 9
+        }
+    }
+
+    fn height(&self) -> usize {
+        match self {
+            LmsParameters::Sha256_H5 => 5,
+            LmsParameters::Sha256_H10 => 10,
+            LmsParameters::Sha256_H15 => 15,
+            LmsParameters::Sha256_H20 => 20,
+            LmsParameters::Sha256_H25 => 25
+        }
+    }
+}
+
+/*
 const LMS_SHA256_N32_H5 : u32 = 5;
 const LMS_SHA256_N32_H10 : u32 = 6;
 const LMS_SHA256_N32_H15 : u32 = 7;
 const LMS_SHA256_N32_H20 : u32 = 8;
 const LMS_SHA256_N32_H25 : u32 = 9;
-
-fn coef(v: &[u8], i: usize) -> u8 {
-    v[i]
-}
 
 fn h_for_param(pk_type: u32) -> Result<usize> {
     match pk_type {
@@ -52,6 +94,11 @@ fn h_for_param(pk_type: u32) -> Result<usize> {
         LMS_SHA256_N32_H25 => Ok(25),
         _ => Err(mbedtls::Error::PkUnknownPkAlg)
     }
+}
+*/
+
+fn coef(v: &[u8], i: usize) -> u8 {
+    v[i]
 }
 
 fn add_checksum(v : &mut Vec<u8>) {
@@ -83,7 +130,7 @@ fn hash_to_qx(message: &[u8], rnd: &[u8], i: &[u8], q: u32) -> Result<Vec<u8>> {
 
     //println!("Input = {}{:08X}{:04X}{}{}", i.to_hex(), q, D_MESG, rnd.to_hex(), message.to_hex());
     r_hash.update(i)?;
-    r_hash.update(&q.to_be_bytes());
+    r_hash.update(&q.to_be_bytes())?;
     r_hash.update(&D_MESG.to_be_bytes())?;
     r_hash.update(rnd)?;
     r_hash.update(message)?;
@@ -100,7 +147,7 @@ fn lms_hash(mut out: &mut [u8], inputs: Vec<&[u8]>) -> Result<()> {
 
     for input in inputs {
         hinput += &input.to_hex();
-        sha256.update(input);
+        sha256.update(input)?;
     }
 
     sha256.finish(&mut out)?;
@@ -293,7 +340,7 @@ fn ots_verify(pk: &LmOtsPublicKey, message: &[u8], sig: &[u8]) -> Result<bool> {
 struct LmsPrivateKey {
     I: Vec<u8>,
     K: Vec<u8>,
-    pk_type: u32,
+    pk_type: LmsParameters,
     q: u32,
     pk: Vec<u8>,
     Ts: Vec<u8>,
@@ -304,8 +351,9 @@ struct LmsPublicKey {
 }
 
 impl LmsPrivateKey {
-    fn new(seed: &[u8], pk_type: u32) -> Result<LmsPrivateKey> {
-        let h = h_for_param(pk_type)?;
+    fn new(seed: &[u8], pk_type: LmsParameters) -> Result<LmsPrivateKey> {
+        let h = pk_type.height();
+        //let h = h_for_param(pk_type)?;
         let h_pow = (1 << h) as u32;
 
         assert_eq!(seed.len(), I_LEN + N);
@@ -324,12 +372,12 @@ impl LmsPrivateKey {
             let mut r : u32 = i + h_pow; // ???
             let mut t = vec![0u8; N];
             let mut t_hash = Md::new(MdType::Sha256)?;
-            t_hash.update(&I);
-            t_hash.update(&r.to_be_bytes());
-            t_hash.update(&D_LEAF.to_be_bytes());
+            t_hash.update(&I)?;
+            t_hash.update(&r.to_be_bytes())?;
+            t_hash.update(&D_LEAF.to_be_bytes())?;
             //println!("LEAF {} = {}", r, pk.pk[24..].to_hex());
-            t_hash.update(&pk.pk[24..]); // fixme don't add header here
-            t_hash.finish(&mut t);
+            t_hash.update(&pk.pk[24..])?; // fixme don't add header here
+            t_hash.finish(&mut t)?;
 
             //println!("T[{}] = {}", r, t.to_hex());
 
@@ -342,16 +390,16 @@ impl LmsPrivateKey {
                 let ls = stack.pop_front().expect("Stack not empty");
 
                 let mut l_hash = Md::new(MdType::Sha256)?;
-                l_hash.update(&I);
-                l_hash.update(&r.to_be_bytes());
-                l_hash.update(&D_INTR.to_be_bytes());
-                l_hash.update(&ls);
+                l_hash.update(&I)?;
+                l_hash.update(&r.to_be_bytes())?;
+                l_hash.update(&D_INTR.to_be_bytes())?;
+                l_hash.update(&ls)?;
 
                 //println!("KeyGen node {} from {}, {}", r, ls.to_hex(),t.to_hex());
                 //println!("Intr {} = {}", r, t.to_hex());
 
-                l_hash.update(&t);
-                l_hash.finish(&mut t);
+                l_hash.update(&t)?;
+                l_hash.finish(&mut t)?;
 
                 Ts[(r as usize)*N..(r as usize + 1)*N].copy_from_slice(&t);
             }
@@ -362,7 +410,7 @@ impl LmsPrivateKey {
         assert_eq!(stack.len(), 1);
 
         let mut pk = vec![];
-        pk.extend(pk_type.to_be_bytes().iter());
+        pk.extend(pk_type.to_u32().to_be_bytes().iter());
         pk.extend(LMOTS_SHA256_N32_W8.to_be_bytes().iter());
         pk.extend(I.clone());
         pk.extend(stack.pop_front().expect("Stack not empty"));
@@ -378,8 +426,7 @@ impl LmsPrivateKey {
     }
 
     fn sign(&mut self, message: &[u8], rnd: &[u8]) -> Result<Vec<u8>> {
-
-        let h = h_for_param(self.pk_type)?;
+        let h = self.pk_type.height();
         let h_pow = (1 << h) as u32;
 
         assert_eq!(rnd.len(), N);
@@ -395,9 +442,9 @@ impl LmsPrivateKey {
         let mut sig = vec![];
         sig.extend(q.to_be_bytes().iter());
         sig.append(&mut ots_sig);
-        sig.extend(self.pk_type.to_be_bytes().iter());
+        sig.extend(self.pk_type.to_u32().to_be_bytes().iter());
 
-        let mut r = h_pow + q;
+        let r = h_pow + q;
         for i in 0..h {
             let idx = (r >> i) ^ 1;
             sig.extend(self.Ts[(idx as usize)*N..(idx as usize + 1)*N].iter());
@@ -432,9 +479,9 @@ impl LmsPublicKey {
             return Ok(false);
         }
 
-        let pk_type = u32::from_be_bytes(self.pk[0..4].try_into().expect("4 bytes"));
+        let pk_type = LmsParameters::from_u32(u32::from_be_bytes(self.pk[0..4].try_into().expect("4 bytes")))?;
 
-        let h = h_for_param(pk_type)?;
+        let h = pk_type.height();
         let h_pow = (1 << h) as u32;
 
         let ots_type = u32::from_be_bytes(self.pk[4..8].try_into().expect("4 bytes"));
@@ -450,7 +497,7 @@ impl LmsPublicKey {
             return Ok(false);
         }
 
-        let sig_pk_type = u32::from_be_bytes(signature[8+N*(P+1)..12+N*(P+1)].try_into().expect("4 bytes"));
+        let sig_pk_type = LmsParameters::from_u32(u32::from_be_bytes(signature[8+N*(P+1)..12+N*(P+1)].try_into().expect("4 bytes")))?;
 
         if pk_type != sig_pk_type {
             println!("signature and pk types don't match (??)");
@@ -505,11 +552,9 @@ impl LmsPublicKey {
         Tc = tmp
          */
         let mut node_num : u32 = q + h_pow;
-        lms_hash(&mut Tc, vec![&I, &node_num.to_be_bytes(), &D_LEAF.to_be_bytes(), &Kc]);
+        lms_hash(&mut Tc, vec![&I, &node_num.to_be_bytes(), &D_LEAF.to_be_bytes(), &Kc])?;
 
         let mut i = 0;
-
-        let mut tmp = vec![0; N];
 
         while node_num > 1 {
             let odd = if node_num % 2 == 1 { true } else { false };
@@ -518,22 +563,22 @@ impl LmsPublicKey {
 
             let mut t_hash = Md::new(MdType::Sha256)?;
 
-            t_hash.update(&I);
-            t_hash.update(&node_num.to_be_bytes());
-            t_hash.update(&D_INTR.to_be_bytes());
+            t_hash.update(&I)?;
+            t_hash.update(&node_num.to_be_bytes())?;
+            t_hash.update(&D_INTR.to_be_bytes())?;
 
             if odd {
                 //println!("Path {} {}", i, "Tc");
                 //println!("Computing node {} from {} {}", node_num, &paths[N*i..N*(i+1)].to_hex(), Tc.to_hex());
-                t_hash.update(&paths[N*i..N*(i+1)]);
-                t_hash.update(&Tc);
+                t_hash.update(&paths[N*i..N*(i+1)])?;
+                t_hash.update(&Tc)?;
             } else {
                 //println!("Path {} {}", "Tc", i);
                 //println!("Computing node {} from {} {}", node_num, Tc.to_hex(), &paths[N*i..N*(i+1)].to_hex());
-                t_hash.update(&Tc);
-                t_hash.update(&paths[N*i..N*(i+1)]);
+                t_hash.update(&Tc)?;
+                t_hash.update(&paths[N*i..N*(i+1)])?;
             }
-            t_hash.finish(&mut Tc);
+            t_hash.finish(&mut Tc)?;
             //println!("Output = {}", Tc.to_hex());
 
             i = i + 1;
@@ -793,7 +838,7 @@ fn lms_5_sign_kat() {
     use rustc_serialize::hex::FromHex;
 
     let seed = vec![0xFF; 48];
-    let mut sk = LmsPrivateKey::new(&seed, LMS_SHA256_N32_H5).unwrap();
+    let mut sk = LmsPrivateKey::new(&seed, LmsParameters::Sha256_H5).unwrap();
 
     let msg = "616263".from_hex().unwrap();
     let rnd = vec![0; 32];
@@ -810,7 +855,7 @@ fn lms_10_sign_kat() {
 
     let seed = vec![0xFF; 48];
     println!("Generating key ...");
-    let mut sk = LmsPrivateKey::new(&seed, LMS_SHA256_N32_H10).unwrap();
+    let mut sk = LmsPrivateKey::new(&seed, LmsParameters::Sha256_H10).unwrap();
     println!(" ... done");
 
     let msg = "616263".from_hex().unwrap();
@@ -879,7 +924,7 @@ fn main() {
     //let mut rng = mbedtls::rng::CtrDrbg::new(&mut entropy, None).unwrap();
 
     let ots_seed = vec![0; N+16];
-    let sk = LmsPrivateKey::new(&ots_seed, LMS_SHA256_N32_H5).unwrap();
+    let sk = LmsPrivateKey::new(&ots_seed, LmsParameters::Sha256_H5).unwrap();
 
     println!("pk={}", sk.pk.to_hex());
 
